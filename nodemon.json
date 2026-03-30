@@ -1,0 +1,11 @@
+{
+  "watch": [
+    "index.js",
+    "lib",
+    "prompts"
+  ],
+  "ext": "js,mjs,cjs",
+  "ignore": [
+    "data/**"
+  ]
+}
