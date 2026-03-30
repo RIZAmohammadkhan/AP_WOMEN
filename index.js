@@ -10,7 +10,7 @@ const { createGroqService } = require("./lib/groq-service");
 const { createChatService } = require("./lib/chat-service");
 
 const app = express();
-const promptBundle = buildPromptBundle();
+const promptBundle = buildPromptBundle(config);
 const conversationStore = new ConversationStore(config.conversationStorePath);
 const groqService = createGroqService(config);
 const chatService = createChatService({
