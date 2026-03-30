@@ -1,0 +1,19 @@
+{
+  "name": "meri-behen-whatsapp",
+  "version": "1.0.0",
+  "description": "WhatsApp webhook for Meri Behen",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "groq-sdk": "^1.1.2",
+    "twilio": "^4.23.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}

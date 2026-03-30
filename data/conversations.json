@@ -1,0 +1,16 @@
+{
+  "whatsapp:+919906090313": {
+    "summary": "",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hi tell me about yourself"
+      },
+      {
+        "role": "assistant",
+        "content": "Hi! I’m Meri Behen, a WhatsApp‑first AI assistant here to help women‑led Self‑Help Groups in Andhra Pradesh find buyers, market demand, schemes, and next steps for selling their products more confidently. Just send me a text, voice note, or photo, and I’ll give you clear, actionable guidance in your language. How can I help you today?"
+      }
+    ],
+    "updatedAt": "2026-03-30T09:34:18.417Z"
+  }
+}
