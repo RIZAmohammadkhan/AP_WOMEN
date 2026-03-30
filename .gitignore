@@ -1,3 +1,6 @@
 .env
 /node_modules
-/data
+
+# Keep the runtime data directory, but ignore generated contents.
+/data/*
+!/data/.gitkeep
