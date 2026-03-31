@@ -17,6 +17,7 @@ const { createAudioResponseService } = require("./lib/audio-response-service");
 const { createAudioInputService } = require("./lib/audio-input-service");
 const { createImageInputService } = require("./lib/image-input-service");
 const { createImageRetentionService } = require("./lib/image-retention-service");
+const { isClearCommand } = require("./lib/clear-command");
 
 const app = express();
 const promptBundle = buildPromptBundle(config);
@@ -66,11 +67,6 @@ const imageRetentionService = createImageRetentionService({
 });
 
 app.use(express.urlencoded({ extended: false }));
-
-function isClearCommand(text) {
-  const normalized = String(text || "").trim().toLowerCase();
-  return normalized === "/clear" || normalized === "@clear";
-}
 
 function collectImagePaths(messages) {
   return (messages || [])
@@ -139,8 +135,8 @@ app.post("/webhook", async (req, res) => {
         return res.type("text/xml").send(twiml.toString());
       }
 
-      const clearedConversation = await conversationStore.clearConversation(from);
-      const imagePaths = collectImagePaths(clearedConversation.messages);
+      const resetResult = await conversationStore.resetConversation(from);
+      const imagePaths = collectImagePaths(resetResult.clearedConversation.messages);
 
       if (imageStore.isConfigured && imagePaths.length) {
         try {
@@ -210,10 +206,13 @@ app.post("/webhook", async (req, res) => {
       message: incomingMessage,
     });
 
-    twiml.message(reply.text);
+    if (reply.status !== "stale_after_reset") {
+      twiml.message(reply.text);
+    }
+
     res.type("text/xml").send(twiml.toString());
 
-    if (reply.shouldSendAudio) {
+    if (reply.status !== "stale_after_reset" && reply.shouldSendAudio) {
       void audioResponseService
         .sendAudioReply({
           text: reply.text,

@@ -146,6 +146,9 @@ create table if not exists public.conversations (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
+alter table public.conversations
+  add column if not exists session_version bigint not null default 0;
+
 alter table public.conversations enable row level security;
 
 create index if not exists conversations_updated_at_idx
@@ -256,6 +259,12 @@ Important behavior:
 | `SARVAM_TTS_PACE` | No | `1` | Sarvam TTS pace |
 | `AUDIO_MEDIA_TTL_MS` | No | `600000` | In-memory TTL for generated outbound audio assets |
 
+Model note:
+
+- as checked on March 31, 2026 in Groq's supported-model docs, `openai/gpt-oss-120b` should be treated as text-only in this app
+- image turns should continue using a vision-capable model such as `meta-llama/llama-4-scout-17b-16e-instruct`
+- if `GROQ_VISION_MODEL` is set to a known text-only model, the app falls back to the default vision model and logs a warning
+
 ## Supported Inputs
 
 ### Text
@@ -287,12 +296,13 @@ This lets users ask follow-up questions about a recent image in later turns.
 - `/clear`
 - `@clear`
 
-These commands delete:
+These commands reset the active chat session by:
 
-- the user’s stored conversation row
+- clearing the stored summary and recent messages
+- incrementing the conversation `session_version`
 - the currently tracked image files for that conversation
 
-The reply confirms the reset so the user can start over with a clean chat.
+The reset is durable, so older in-flight replies cannot restore pre-clear history. The reply confirms the reset so the user can start over with a clean chat.
 
 ## Image Retention
 
