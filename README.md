@@ -1,6 +1,6 @@
 # Meri Behen
 
-Meri Behen is a WhatsApp-first assistant for women-led Self-Help Groups in Andhra Pradesh. This repository contains the current Node.js webhook service that receives WhatsApp messages from Twilio, generates text replies with Groq, keeps lightweight conversation history, and can optionally send audio replies using Sarvam TTS.
+Meri Behen is a WhatsApp-first assistant for women-led Self-Help Groups in Andhra Pradesh. This repository contains the current Node.js webhook service that receives WhatsApp messages from Twilio, generates text replies with Groq, keeps lightweight conversation history, can transcribe incoming voice notes with Sarvam STT, and can optionally send audio replies using Sarvam TTS.
 
 The current codebase is an MVP backend for that larger product idea. The broader product direction lives in [`prompts/idea.md`](./prompts/idea.md) and the planned business-tool contracts live in [`prompts/tools.md`](./prompts/tools.md).
 
@@ -8,6 +8,7 @@ The current codebase is an MVP backend for that larger product idea. The broader
 
 - Receives inbound WhatsApp webhook requests from Twilio
 - Accepts text messages and returns a text response as TwiML
+- Accepts WhatsApp voice notes, transcribes them with Sarvam, and routes the transcript through the same chat flow
 - Stores per-user conversation history in a local JSON file
 - Summarizes older conversation turns to keep prompt size under control
 - Uses Groq for both chat replies and conversation summarization
@@ -16,14 +17,13 @@ The current codebase is an MVP backend for that larger product idea. The broader
 
 ## What Is Not Implemented Yet
 
-- Incoming voice-note transcription
 - Incoming image understanding
 - Live business tools from `prompts/tools.md`
 - Database-backed persistence
 - Automated tests
 - Production deployment configuration
 
-One important current limitation: if a user sends media, the webhook responds with a text fallback telling them that only text chat is supported right now.
+One important current limitation: only text and audio are supported. If a user sends non-audio media, the webhook responds with a fallback asking for text or a voice note.
 
 ## Tech Stack
 
@@ -112,12 +112,14 @@ By default, the server listens on port `3000`.
 | `CONVERSATION_STORE_PATH` | No | `./data/conversations.json` | JSON file used for conversation storage |
 | `MAX_RECENT_MESSAGES` | No | `12` | Max recent messages to keep before compaction |
 | `MAX_CONTEXT_CHARS` | No | `6000` | Approximate context-size limit before summarization |
-| `ENABLE_AUDIO_RESPONSE` | No | `false` | Enables async voice-note replies |
+| `ENABLE_AUDIO_INPUT` | No | `false` | Enables incoming voice-note transcription |
+| `ENABLE_AUDIO_OUTPUT` | No | `false` | Enables async voice-note replies |
 | `PUBLIC_BASE_URL` | Recommended for audio | empty | Public base URL used for Twilio media fetches |
 | `TWILIO_ACCOUNT_SID` | Recommended, required for audio sends | empty | Twilio REST client credential |
 | `TWILIO_AUTH_TOKEN` | Recommended, required for audio sends | empty | Twilio REST client credential |
 | `TWILIO_WHATSAPP_FROM` | Recommended | empty | WhatsApp sender number, for example `whatsapp:+14155238886` |
 | `SARVAM_API_KEY` | Required only for audio | empty | Sarvam TTS API key |
+| `SARVAM_STT_MODEL` | No | `saaras:v3` | Sarvam speech-to-text model |
 | `SARVAM_TTS_MODEL` | No | `bulbul:v3` | Sarvam TTS model |
 | `SARVAM_TTS_SPEAKER` | No | `shreya` | Sarvam voice |
 | `SARVAM_OUTPUT_AUDIO_CODEC` | No | `opus` | Output codec for generated audio |
@@ -167,17 +169,30 @@ The response should be TwiML XML containing the assistant reply.
 
 1. Twilio sends an inbound WhatsApp message to `POST /webhook`.
 2. The app reads the sender ID from `From`.
-3. Existing conversation state is loaded from the JSON store.
-4. Older history may be summarized if the conversation gets too long.
-5. Groq generates the assistant reply.
-6. The text reply is returned immediately to Twilio as TwiML.
-7. If audio replies are enabled, the app asynchronously generates TTS audio and sends one or more WhatsApp media messages through the Twilio REST API.
+3. If the message is a voice note and audio input is enabled, the app downloads the media from Twilio, transcribes it with Sarvam STT, runs Sarvam text language detection on the transcript, and uses the transcript as the user message.
+4. Existing conversation state is loaded from the JSON store.
+5. Older history may be summarized if the conversation gets too long.
+6. Groq generates the assistant reply.
+7. The text reply is returned immediately to Twilio as TwiML.
+8. If audio replies are enabled, the app asynchronously generates TTS audio and sends one or more WhatsApp media messages through the Twilio REST API.
 
 The audio path is separate from the text response. Users receive the text reply first, and the audio message follows afterward if all audio prerequisites are configured correctly.
 
+## Audio Input Behavior
+
+When `ENABLE_AUDIO_INPUT=true`, the app:
+
+- Accepts inbound WhatsApp audio media
+- Downloads the media from Twilio
+- Sends the audio to Sarvam Speech-to-Text
+- Calls Sarvam language detection on the transcript
+- Proceeds through the normal chat flow with the transcribed text
+
+If transcription fails, the user receives a short fallback asking her to retry or send text.
+
 ## Audio Reply Behavior
 
-When `ENABLE_AUDIO_RESPONSE=true`, the app:
+When `ENABLE_AUDIO_OUTPUT=true`, the app:
 
 - Detects a language code from the reply text
 - Splits long responses into chunks
@@ -222,7 +237,7 @@ Generated audio is not written to disk. It is stored in memory and expires after
 - If `GROQ_API_KEY` is missing or invalid, the app returns a configuration message instead of a model response.
 - If audio is enabled but `PUBLIC_BASE_URL` is missing, the app logs why audio was skipped.
 - If Twilio REST credentials are missing, text replies still work through webhook TwiML, but async audio sends will be skipped.
-- If users send media instead of text, the app currently returns a text-only fallback.
+- If users send non-audio media, the app returns a text-only fallback.
 
 ## Development Notes
 

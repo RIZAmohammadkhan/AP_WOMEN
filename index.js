@@ -11,6 +11,7 @@ const { createChatService } = require("./lib/chat-service");
 const { AudioStore } = require("./lib/audio-store");
 const { createSarvamService } = require("./lib/sarvam-service");
 const { createAudioResponseService } = require("./lib/audio-response-service");
+const { createAudioInputService } = require("./lib/audio-input-service");
 
 const app = express();
 const promptBundle = buildPromptBundle(config);
@@ -33,6 +34,10 @@ const audioResponseService = createAudioResponseService({
   audioStore,
   sarvamService,
   twilioClient: twilioRestClient,
+});
+const audioInputService = createAudioInputService({
+  config,
+  sarvamService,
 });
 
 app.use(express.urlencoded({ extended: false }));
@@ -70,27 +75,44 @@ app.post("/webhook", async (req, res) => {
   const to = req.body.To || config.twilioWhatsAppFrom || "";
   const body = typeof req.body.Body === "string" ? req.body.Body.trim() : "";
   const hasMedia = Boolean(req.body.MediaContentType0);
-  const type = hasMedia ? "media" : "text";
+  const mediaContentType = req.body.MediaContentType0 || "";
+  const mediaUrl = req.body.MediaUrl0 || "";
+  const isAudioMessage =
+    hasMedia && audioInputService.isSupportedAudioContentType(mediaContentType);
+  const type = isAudioMessage ? "audio" : hasMedia ? "media" : "text";
   const publicBaseUrl = audioResponseService.resolvePublicBaseUrl(req);
 
   console.log(`Incoming message from ${from} [${type}]: ${body}`);
 
   const twiml = new twilio.twiml.MessagingResponse();
 
-  if (hasMedia) {
-    twiml.message("Text chat is supported right now. Please send your message as text.");
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  if (!body) {
-    twiml.message("Please send a text message so I can help you.");
-    return res.type("text/xml").send(twiml.toString());
-  }
-
   try {
+    let incomingText = body;
+
+    if (hasMedia && !isAudioMessage) {
+      twiml.message(
+        "Text and voice notes are supported right now. Please send your message as text or audio."
+      );
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (isAudioMessage) {
+      const transcription = await audioInputService.transcribeIncomingAudio({
+        mediaUrl,
+        mediaContentType,
+      });
+
+      incomingText = [body, transcription.text].filter(Boolean).join("\n").trim();
+    }
+
+    if (!incomingText) {
+      twiml.message("Please send a text message or voice note so I can help you.");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     const reply = await chatService.respondToMessage({
       userId: from,
-      text: body,
+      text: incomingText,
     });
 
     twiml.message(reply.text);
@@ -112,6 +134,11 @@ app.post("/webhook", async (req, res) => {
     return;
   } catch (error) {
     console.error("Webhook reply failed:", error);
+    if (error.userMessage) {
+      twiml.message(error.userMessage);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     twiml.message(
       "I'm having trouble replying right now. Please try again in a moment."
     );
