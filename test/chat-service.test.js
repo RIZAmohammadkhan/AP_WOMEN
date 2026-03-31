@@ -104,3 +104,141 @@ test("respondToMessage suppresses stale replies after reset", async () => {
   assert.equal(result.text, "");
   assert.equal(result.shouldSendAudio, false);
 });
+
+test("respondToMessage sends image-only turns to the model with a fallback prompt and signed URL", async () => {
+  let capturedMessages = null;
+  let capturedOptions = null;
+
+  const llmService = {
+    isConfigured: true,
+    configurationMessage: "Missing config",
+    async chat(messages, options) {
+      capturedMessages = messages;
+      capturedOptions = options;
+      return "You look great today.";
+    },
+    async summarize() {
+      return "";
+    },
+  };
+  const conversationStore = {
+    isConfigured: true,
+    async getConversation() {
+      return {
+        summary: "",
+        messages: [],
+        sessionVersion: 0,
+        updatedAt: "2026-03-31T00:00:00.000Z",
+      };
+    },
+    async updateConversation() {
+      return {
+        status: "updated",
+        conversation: {
+          summary: "",
+          messages: [],
+          sessionVersion: 0,
+          updatedAt: "2026-03-31T00:00:01.000Z",
+        },
+      };
+    },
+  };
+  const chatService = createChatService({
+    config: {
+      maxRecentMessages: 12,
+      maxContextChars: 6000,
+    },
+    llmService,
+    conversationStore,
+    promptBundle: {
+      systemPrompt: "You are Meri Behen.",
+    },
+    imageStore: {
+      isConfigured: true,
+      async createSignedUrl(path) {
+        return `https://signed.example/${path}`;
+      },
+    },
+  });
+
+  const result = await chatService.respondToMessage({
+    userId: "user-1",
+    message: { imagePath: "image/path.jpg", imageStoredAt: "2026-03-31T00:00:00.000Z" },
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.text, "You look great today.");
+  assert.equal(capturedOptions.requiresVision, true);
+  assert.equal(capturedMessages.length, 2);
+  assert.equal(capturedMessages[1].role, "user");
+  assert.equal(capturedMessages[1].content[0].text, "The user shared this image. Answer using the image and the conversation context.");
+  assert.equal(capturedMessages[1].content[1].image_url.url, "https://signed.example/image/path.jpg");
+});
+
+test("respondToMessage preserves image captions for image-plus-text turns", async () => {
+  let capturedMessages = null;
+
+  const llmService = {
+    isConfigured: true,
+    configurationMessage: "Missing config",
+    async chat(messages) {
+      capturedMessages = messages;
+      return "Nice outfit.";
+    },
+    async summarize() {
+      return "";
+    },
+  };
+  const conversationStore = {
+    isConfigured: true,
+    async getConversation() {
+      return {
+        summary: "",
+        messages: [],
+        sessionVersion: 0,
+        updatedAt: "2026-03-31T00:00:00.000Z",
+      };
+    },
+    async updateConversation() {
+      return {
+        status: "updated",
+        conversation: {
+          summary: "",
+          messages: [],
+          sessionVersion: 0,
+          updatedAt: "2026-03-31T00:00:01.000Z",
+        },
+      };
+    },
+  };
+  const chatService = createChatService({
+    config: {
+      maxRecentMessages: 12,
+      maxContextChars: 6000,
+    },
+    llmService,
+    conversationStore,
+    promptBundle: {
+      systemPrompt: "You are Meri Behen.",
+    },
+    imageStore: {
+      isConfigured: true,
+      async createSignedUrl(path) {
+        return `https://signed.example/${path}`;
+      },
+    },
+  });
+
+  await chatService.respondToMessage({
+    userId: "user-1",
+    message: {
+      text: "How am I looking today in the photo?",
+      imagePath: "image/path.jpg",
+      imageStoredAt: "2026-03-31T00:00:00.000Z",
+    },
+  });
+
+  assert.equal(capturedMessages[1].role, "user");
+  assert.equal(capturedMessages[1].content[0].text, "How am I looking today in the photo?");
+  assert.equal(capturedMessages[1].content[1].image_url.url, "https://signed.example/image/path.jpg");
+});

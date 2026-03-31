@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   DEFAULT_GROQ_VISION_MODEL,
+  normalizeGoogleGenAiModel,
   normalizeLlmProvider,
   resolveProviderModels,
 } = require("../lib/llm-provider-config");
@@ -46,4 +47,23 @@ test("resolveProviderModels falls back to the default groq vision model for text
 
   assert.equal(result.visionModel, DEFAULT_GROQ_VISION_MODEL);
   assert.equal(result.usedVisionFallback, true);
+});
+
+test("normalizeGoogleGenAiModel rewrites flash latest alias to a versioned multimodal model", () => {
+  assert.equal(normalizeGoogleGenAiModel("gemini-flash-latest"), "gemini-2.5-flash");
+});
+
+test("resolveProviderModels normalizes gemini latest aliases before LangChain sees them", () => {
+  const result = resolveProviderModels(
+    {
+      GEMINI_TEXT_MODEL: "gemini-flash-latest",
+      GEMINI_VISION_MODEL: "gemini-flash-latest",
+      GEMINI_SUMMARY_MODEL: "gemini-flash-latest",
+    },
+    "google-genai"
+  );
+
+  assert.equal(result.textModel, "gemini-2.5-flash");
+  assert.equal(result.visionModel, "gemini-2.5-flash");
+  assert.equal(result.summaryModel, "gemini-2.5-flash");
 });
