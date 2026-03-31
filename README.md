@@ -1,109 +1,226 @@
 # Meri Behen
 
-Meri Behen is a WhatsApp-first assistant for women-led Self-Help Groups in Andhra Pradesh. This repository contains the current Node.js webhook service that receives WhatsApp messages from Twilio, generates text replies with Groq, stores conversation history in Supabase, can transcribe incoming voice notes with Sarvam STT, can answer questions about WhatsApp images with Groq vision models, and can optionally send audio replies using Sarvam TTS.
+Meri Behen is a WhatsApp-first AI assistant designed for women-led Self-Help Groups in Andhra Pradesh. The idea is simple: meet users inside a tool they already use, let them ask in their own language through text, voice notes, or images, and return clear next steps without making them learn a new app.
 
-The current codebase is an MVP backend for that larger product idea. The broader product direction lives in [`prompts/idea.md`](./prompts/idea.md) and the planned business-tool contracts live in [`prompts/tools.md`](./prompts/tools.md).
+This repository contains the current backend webhook service. It receives inbound WhatsApp messages from Twilio, stores conversation state in Supabase, uses Groq for chat and image-aware responses, uses Sarvam for speech-to-text and text-to-speech, and sends replies back over WhatsApp.
+
+## Why This Project Exists
+
+Many SHGs already produce valuable products such as pickles, handicrafts, textiles, and household goods. The harder problem is not only production but access:
+
+- market information is fragmented
+- buyer discovery is difficult
+- scheme and onboarding flows are hard to understand
+- most digital tools assume English fluency and higher digital confidence
+
+Meri Behen is meant to reduce that friction by turning WhatsApp into a conversational business guide. The long-term product direction lives in [prompts/idea.md](./prompts/idea.md) and the conceptual tool contracts live in [prompts/tools.md](./prompts/tools.md).
 
 ## What The App Does Today
 
-- Receives inbound WhatsApp webhook requests from Twilio
-- Accepts text messages and returns a text response as TwiML
-- Accepts WhatsApp voice notes, transcribes them with Sarvam, and routes the transcript through the same chat flow
-- Accepts WhatsApp images, stores them in Supabase Storage, and includes recent images in later AI turns
-- Supports `/clear` and `@clear` commands to wipe a user's stored conversation and image context
-- Stores per-user conversation history in Supabase Postgres
-- Summarizes older conversation turns to keep prompt size under control
-- Uses Groq for both chat replies and conversation summarization
-- Can optionally generate voice-note replies with Sarvam TTS
-- Serves temporary audio media files that Twilio can fetch for WhatsApp media messages
+- Accepts inbound WhatsApp text messages
+- Accepts inbound WhatsApp voice notes
+- Transcribes voice notes with Sarvam Speech-to-Text
+- Detects transcript language with Sarvam text language detection
+- Accepts inbound WhatsApp images
+- Stores inbound images in Supabase Storage
+- Lets the AI answer questions about a recent image in later turns
+- Stores conversation state in Supabase Postgres
+- Summarizes older conversation turns to stay within context limits
+- Uses a Groq text model for normal chat replies
+- Uses a Groq vision-capable model when image context is present
+- Optionally sends outbound voice-note replies using Sarvam TTS
+- Supports `/clear` and `@clear` to reset a user conversation
+- Cleans up stored images after the retention window
 
 ## What Is Not Implemented Yet
 
-- Live business tools from `prompts/tools.md`
-- Automated tests
-- Production deployment configuration
+- real business data tools from [prompts/tools.md](./prompts/tools.md)
+- automated tests
+- production deployment packaging
+- background job infrastructure outside the app process
+- analytics, tracing, and admin tooling
 
-One important current limitation: only text, audio, and images are supported. If a user sends any other media type, the webhook responds with a fallback asking for supported input types.
+## Current Product Behavior
+
+The assistant is currently a conversational multimodal backend. It is already useful as a WhatsApp-native interface layer, but it is not yet connected to live market, buyer, scheme, or platform systems. Right now the AI can understand:
+
+- plain text
+- audio that can be transcribed into text
+- images that stay inside the recent conversation window
+
+If an image falls out of the recent-message window and gets summarized, the raw image is removed and only the summary remains.
 
 ## Tech Stack
 
-- Node.js + Express
-- Twilio WhatsApp webhook + Twilio REST API
+- Node.js 18+
+- Express
+- Twilio WhatsApp webhooks and Twilio REST API
 - Groq chat completions
-- Supabase Postgres + Storage
-- Sarvam text-to-speech
+- Supabase Postgres
+- Supabase Storage
+- Sarvam Speech-to-Text
+- Sarvam Text-to-Speech
 
-## Project Structure
+## High-Level Architecture
+
+1. Twilio sends an inbound WhatsApp webhook to `POST /webhook`.
+2. The app reads `From`, `Body`, and media metadata from the webhook payload.
+3. If the message is audio, the app downloads the media from Twilio and sends it to Sarvam STT.
+4. If the message is an image, the app downloads it from Twilio and uploads it to Supabase Storage.
+5. The conversation is loaded from Supabase.
+6. The app builds a chat payload for Groq:
+   - text-only model for normal turns
+   - vision model when recent messages include images
+7. Groq returns the assistant response.
+8. The text reply is sent back immediately as TwiML.
+9. If audio output is enabled, the app generates speech with Sarvam and sends voice-note media through the Twilio REST API.
+10. A retention worker periodically deletes expired images from Supabase Storage and removes stale image references from conversations.
+
+## Repository Structure
 
 ```text
 .
-|-- index.js                     # Express app and Twilio webhook routes
+|-- index.js
 |-- lib/
-|   |-- config.js               # Environment parsing and defaults
-|   |-- chat-service.js         # Chat flow + conversation compaction
-|   |-- groq-service.js         # Groq API wrapper
-|   |-- conversation-store.js   # Supabase conversation persistence
-|   |-- audio-response-service.js
-|   |-- sarvam-service.js
-|   |-- audio-store.js
-|   |-- image-store.js
-|   |-- image-input-service.js
+|   |-- config.js
+|   |-- prompt-loader.js
+|   |-- groq-service.js
+|   |-- chat-service.js
+|   |-- conversation-store.js
 |   |-- supabase-client.js
 |   |-- twilio-media-service.js
-|   |-- language.js             # Script-based language detection for TTS
+|   |-- image-store.js
+|   |-- image-input-service.js
+|   |-- image-retention-service.js
+|   |-- sarvam-service.js
+|   |-- audio-input-service.js
+|   |-- audio-response-service.js
+|   |-- audio-store.js
+|   |-- language.js
 |-- supabase/
-|   |-- schema.sql              # Conversation table setup
+|   |-- schema.sql
 |-- prompts/
-|   |-- idea.md                 # Product vision
-|   |-- tools.md                # Planned tool contracts
+|   |-- idea.md
+|   |-- tools.md
 |-- .env.example
+|-- package.json
 ```
 
 ## Prerequisites
 
 - Node.js 18 or newer
 - npm
-- A Twilio account with WhatsApp enabled
-- A Groq API key
-- A Supabase project
-- A public HTTPS URL for webhook testing, such as ngrok
+- a Twilio account with WhatsApp enabled
+- a Groq API key
+- a Supabase project
+- a public HTTPS URL for Twilio webhook testing, such as ngrok
 
-Optional for audio replies:
+Optional:
 
-- Sarvam API key
-- Twilio Account SID and Auth Token for sending outbound media messages
-
-Node 18+ is recommended because the Sarvam integration uses the built-in `fetch` API.
+- a Sarvam API key for audio input and audio output
+- Twilio Account SID and Auth Token for outbound media sends
 
 ## Setup
 
-1. Install dependencies:
+### 1. Install dependencies
 
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+```
 
-2. Create your environment file:
+### 2. Create the environment file
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+cp .env.example .env
+```
 
-3. Fill in the required values in `.env`.
+### 3. Configure Supabase
 
-4. Start the server:
+In Supabase SQL Editor, run [supabase/schema.sql](./supabase/schema.sql):
 
-   ```bash
-   npm start
-   ```
+```sql
+create table if not exists public.conversations (
+  user_id text primary key,
+  summary text not null default '',
+  messages jsonb not null default '[]'::jsonb,
+  updated_at timestamptz not null default timezone('utc', now())
+);
 
-   For local development with auto-reload:
+alter table public.conversations enable row level security;
 
-   ```bash
-   npm run dev
-   ```
+create index if not exists conversations_updated_at_idx
+  on public.conversations (updated_at desc);
+```
 
-By default, the server listens on port `3000`.
+Notes:
+
+- the app expects the table in `public`
+- the default table name is `conversations`
+- the app will try to create the storage bucket automatically if it does not exist and the service-role key has permission
+
+### 4. Fill in `.env`
+
+At minimum, provide:
+
+```env
+PORT=3000
+GROQ_API_KEY=your_groq_api_key
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
+```
+
+For audio input and audio output, also provide:
+
+```env
+SARVAM_API_KEY=your_sarvam_api_key
+ENABLE_AUDIO_INPUT=true
+ENABLE_AUDIO_OUTPUT=true
+```
+
+For outbound audio replies, you also need:
+
+```env
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+PUBLIC_BASE_URL=https://your-public-domain.example
+```
+
+### 5. Start the server
+
+```bash
+npm start
+```
+
+For development with autoreload:
+
+```bash
+npm run dev
+```
+
+By default the app listens on port `3000`.
+
+## Twilio Setup
+
+1. Start the app locally.
+2. Expose it with a public tunnel:
+
+```bash
+ngrok http 3000
+```
+
+3. In Twilio, set the incoming WhatsApp webhook URL to:
+
+```text
+https://your-public-url/webhook
+```
+
+Twilio sends webhook payloads as `application/x-www-form-urlencoded`, which is what this app expects.
+
+Important behavior:
+
+- there is no special Twilio slash-command registration for this app
+- `/clear` and `@clear` are handled by checking the incoming `Body` text in the webhook
 
 ## Environment Variables
 
@@ -111,68 +228,105 @@ By default, the server listens on port `3000`.
 | --- | --- | --- | --- |
 | `PORT` | No | `3000` | Express server port |
 | `GROQ_API_KEY` | Yes | - | Enables chat replies and summarization |
-| `GROQ_CHAT_MODEL` | No | `openai/gpt-oss-20b` | Model used for text-only replies |
-| `GROQ_VISION_MODEL` | No | `meta-llama/llama-4-scout-17b-16e-instruct` | Model used when recent messages include an image |
-| `SUMMARY_MODEL` | No | same as `GROQ_CHAT_MODEL` | Model used for history summarization |
-| `SYSTEM_PROMPT` | No | built-in fallback | Base assistant persona and instruction seed |
+| `GROQ_CHAT_MODEL` | No | `openai/gpt-oss-20b` | Model used for text-only turns |
+| `GROQ_VISION_MODEL` | No | `meta-llama/llama-4-scout-17b-16e-instruct` | Model used when image context is present |
+| `SUMMARY_MODEL` | No | same as `GROQ_CHAT_MODEL` | Model used for conversation summarization |
+| `SYSTEM_PROMPT` | No | built-in fallback | Base assistant instruction seed |
 | `SUPABASE_URL` | Yes | - | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Server-side Supabase key used for database and storage access |
-| `SUPABASE_CONVERSATIONS_TABLE` | No | `conversations` | Table used for conversation rows |
-| `SUPABASE_IMAGE_BUCKET` | No | `conversation-images` | Bucket used to store inbound WhatsApp images |
-| `SUPABASE_SIGNED_IMAGE_URL_TTL_SECONDS` | No | `3600` | Signed URL lifetime used when the model needs to read a stored image |
-| `SUPABASE_IMAGE_RETENTION_DAYS` | No | `7` | How long inbound images stay in Supabase Storage before cleanup |
-| `IMAGE_CLEANUP_INTERVAL_MS` | No | `3600000` | How often the app scans for expired image files to delete |
-| `MAX_RECENT_MESSAGES` | No | `12` | Max recent messages to keep before compaction |
-| `MAX_CONTEXT_CHARS` | No | `6000` | Approximate context-size limit before summarization |
-| `ENABLE_AUDIO_INPUT` | No | `false` | Enables incoming voice-note transcription |
-| `ENABLE_AUDIO_OUTPUT` | No | `false` | Enables async voice-note replies |
-| `PUBLIC_BASE_URL` | Recommended for audio | empty | Public base URL used for Twilio media fetches |
-| `TWILIO_ACCOUNT_SID` | Recommended, required for audio sends | empty | Twilio REST client credential |
-| `TWILIO_AUTH_TOKEN` | Recommended, required for audio sends | empty | Twilio REST client credential |
-| `TWILIO_WHATSAPP_FROM` | Recommended | empty | WhatsApp sender number, for example `whatsapp:+14155238886` |
-| `SARVAM_API_KEY` | Required only for audio | empty | Sarvam TTS API key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Service-role key used by the server |
+| `SUPABASE_CONVERSATIONS_TABLE` | No | `conversations` | Conversation table name |
+| `SUPABASE_IMAGE_BUCKET` | No | `conversation-images` | Supabase Storage bucket for inbound images |
+| `SUPABASE_SIGNED_IMAGE_URL_TTL_SECONDS` | No | `3600` | Signed URL lifetime for model image access |
+| `SUPABASE_IMAGE_RETENTION_DAYS` | No | `7` | Image retention window before cleanup |
+| `IMAGE_CLEANUP_INTERVAL_MS` | No | `3600000` | How often the cleanup worker runs |
+| `MAX_RECENT_MESSAGES` | No | `12` | Recent message window before summarization |
+| `MAX_CONTEXT_CHARS` | No | `6000` | Approximate context limit before summarization |
+| `ENABLE_AUDIO_INPUT` | No | `false` | Enables inbound voice-note transcription |
+| `ENABLE_AUDIO_OUTPUT` | No | `false` | Enables outbound voice-note replies |
+| `PUBLIC_BASE_URL` | Recommended for audio output | empty | Public base URL for Twilio media fetches |
+| `TWILIO_ACCOUNT_SID` | Recommended, required for outbound media sends | empty | Twilio REST credential |
+| `TWILIO_AUTH_TOKEN` | Recommended, required for outbound media sends | empty | Twilio REST credential |
+| `TWILIO_WHATSAPP_FROM` | Recommended | empty | WhatsApp sender number |
+| `SARVAM_API_KEY` | Required for audio features | empty | Sarvam API key |
 | `SARVAM_STT_MODEL` | No | `saaras:v3` | Sarvam speech-to-text model |
-| `SARVAM_TTS_MODEL` | No | `bulbul:v3` | Sarvam TTS model |
-| `SARVAM_TTS_SPEAKER` | No | `shreya` | Sarvam voice |
-| `SARVAM_OUTPUT_AUDIO_CODEC` | No | `opus` | Output codec for generated audio |
-| `SARVAM_SPEECH_SAMPLE_RATE` | No | `24000` | Sample rate sent to Sarvam |
-| `SARVAM_TTS_PACE` | No | `1` | Speech pace for TTS |
-| `AUDIO_MEDIA_TTL_MS` | No | `600000` | How long generated audio stays available in memory |
+| `SARVAM_TTS_MODEL` | No | `bulbul:v3` | Sarvam text-to-speech model |
+| `SARVAM_TTS_SPEAKER` | No | `shreya` | Sarvam speaker voice |
+| `SARVAM_OUTPUT_AUDIO_CODEC` | No | `opus` | Audio codec for generated speech |
+| `SARVAM_SPEECH_SAMPLE_RATE` | No | `24000` | Sample rate sent to Sarvam TTS |
+| `SARVAM_TTS_PACE` | No | `1` | Sarvam TTS pace |
+| `AUDIO_MEDIA_TTL_MS` | No | `600000` | In-memory TTL for generated outbound audio assets |
 
-## Running With Twilio
+## Supported Inputs
 
-1. Start the app locally:
+### Text
 
-   ```bash
-   npm run dev
-   ```
+Plain text messages are sent directly into the Groq chat flow.
 
-2. Expose it with a public HTTPS tunnel:
+### Audio
 
-   ```bash
-   ngrok http 3000
-   ```
+When `ENABLE_AUDIO_INPUT=true`:
 
-3. In Twilio, configure the incoming WhatsApp webhook to:
+- Twilio media is downloaded
+- audio is sent to Sarvam STT
+- transcript language is detected with Sarvam text language detection
+- the resulting text is treated like a normal user message
 
-   ```text
-   https://your-public-url/webhook
-   ```
+### Images
 
-4. Send a WhatsApp message to your Twilio sender or sandbox number.
+When the incoming message is an image:
 
-Twilio sends webhook requests as `application/x-www-form-urlencoded`, which is what this app expects.
+- Twilio media is downloaded
+- the image is uploaded to Supabase Storage
+- the image path is stored in conversation history
+- fresh signed URLs are generated for recent image messages when Groq needs to reason over them
 
-Twilio does not provide a separate slash-command mechanism for this webhook flow. Commands such as `/clear` or `@clear` are handled by checking the incoming `Body` text in the webhook request.
+This lets users ask follow-up questions about a recent image in later turns.
 
-Before running the app against Supabase:
+## Supported Commands
 
-1. Set `SUPABASE_IMAGE_BUCKET` to the bucket you want to use. The app will try to create that private bucket automatically with the service-role key if it does not exist yet.
-2. Run the SQL in `supabase/schema.sql` in your Supabase SQL editor.
+- `/clear`
+- `@clear`
 
-## Local Smoke Test Without Twilio
+These commands delete:
 
-You can simulate a Twilio webhook call with:
+- the user’s stored conversation row
+- the currently tracked image files for that conversation
+
+The reply confirms the reset so the user can start over with a clean chat.
+
+## Image Retention
+
+Inbound images do not stay forever.
+
+They are removed in three cases:
+
+- the user sends `/clear` or `@clear`
+- image-bearing messages are summarized out of the recent window
+- the retention worker sees an image older than `SUPABASE_IMAGE_RETENTION_DAYS`
+
+The retention worker runs inside the app process on an interval controlled by `IMAGE_CLEANUP_INTERVAL_MS`.
+
+Practical note:
+
+- if the app is not running, cleanup waits until the next process start or the next scheduled pass
+
+## Outbound Audio Replies
+
+When `ENABLE_AUDIO_OUTPUT=true`, the app can send an additional WhatsApp voice-note-style reply after the text response.
+
+The flow is:
+
+- detect a Sarvam-compatible language code from the reply text
+- split long replies into chunks
+- synthesize each chunk with Sarvam TTS
+- expose the generated audio temporarily through `/media/:token.:extension`
+- ask Twilio to send those media URLs to the user
+
+The text reply still goes out first. Audio is best-effort and is skipped if any prerequisite is missing.
+
+## Local Smoke Testing
+
+You can simulate a plain text Twilio webhook with:
 
 ```bash
 curl -X POST http://localhost:3000/webhook \
@@ -182,109 +336,67 @@ curl -X POST http://localhost:3000/webhook \
   --data-urlencode "Body=Hello"
 ```
 
-The response should be TwiML XML containing the assistant reply.
+You can simulate the clear command with:
 
-## How The Request Flow Works
+```bash
+curl -X POST http://localhost:3000/webhook \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "From=whatsapp:+911111111111" \
+  --data-urlencode "Body=/clear"
+```
 
-1. Twilio sends an inbound WhatsApp message to `POST /webhook`.
-2. The app reads the sender ID from `From`.
-3. If the message is a voice note and audio input is enabled, the app downloads the media from Twilio, transcribes it with Sarvam STT, runs Sarvam text language detection on the transcript, and uses the transcript as the user message.
-4. If the message is an image, the app downloads it from Twilio, uploads it to Supabase Storage, and stores the bucket path with the user message.
-5. If the user sends `/clear` or `@clear`, the app deletes that user's conversation row and deletes any currently tracked images for that conversation.
-6. Existing conversation state is loaded from Supabase.
-7. If any recent user message contains an image, the app generates fresh signed URLs and sends those images back to the vision-capable Groq model together with the recent text turns.
-8. Older history may be summarized if the conversation gets too long.
-9. Groq generates the assistant reply.
-10. The text reply is returned immediately to Twilio as TwiML.
-11. If audio replies are enabled, the app asynchronously generates TTS audio and sends one or more WhatsApp media messages through the Twilio REST API.
+For real media testing, use Twilio WhatsApp directly because media URLs and auth behavior are part of the live webhook flow.
 
-The audio path is separate from the text response. Users receive the text reply first, and the audio message follows afterward if all audio prerequisites are configured correctly.
+## Troubleshooting
 
-## Audio Input Behavior
+### `Could not find the table 'public.conversations' in the schema cache`
 
-When `ENABLE_AUDIO_INPUT=true`, the app:
+Run [supabase/schema.sql](./supabase/schema.sql) in Supabase SQL Editor, then restart the app.
 
-- Accepts inbound WhatsApp audio media
-- Downloads the media from Twilio
-- Sends the audio to Sarvam Speech-to-Text
-- Calls Sarvam language detection on the transcript
-- Proceeds through the normal chat flow with the transcribed text
+### Audio input says it is not enabled
 
-If transcription fails, the user receives a short fallback asking her to retry or send text.
+Set:
 
-## Image Input Behavior
+```env
+ENABLE_AUDIO_INPUT=true
+SARVAM_API_KEY=...
+```
 
-When a user sends an image:
+### Audio output is skipped
 
-- The app downloads the image from Twilio
-- Uploads it to Supabase Storage
-- Stores the image path in the conversation record
-- Uses a Groq vision model when the current or recent messages contain images
-- Rehydrates recent images as signed URLs so the user can ask follow-up questions about them in later turns
-- Deletes expired images after the retention window, which defaults to 7 days
+Check all of:
 
-If an image falls out of the recent-message window and is summarized away, the model keeps only the summary text, not the raw image itself.
+- `ENABLE_AUDIO_OUTPUT=true`
+- `SARVAM_API_KEY`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_WHATSAPP_FROM`
+- `PUBLIC_BASE_URL`
 
-## Audio Reply Behavior
+### Image support says it is not configured
 
-When `ENABLE_AUDIO_OUTPUT=true`, the app:
+Check all of:
 
-- Detects a language code from the reply text
-- Splits long responses into chunks
-- Sends each chunk to Sarvam for speech synthesis
-- Stores the generated audio in an in-memory tokenized store
-- Exposes each file through `GET /media/:token.:extension`
-- Sends those media URLs back to the user via Twilio
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_IMAGE_BUCKET`
 
-Current TTS language detection is script-based and supports:
+### Voice-note or image download fails
 
-- English written in Latin script
-- Telugu
-- Tamil
-- Kannada
-- Malayalam
-- Gujarati
-- Bengali
-- Punjabi
-- Odia
-- Hindi
-
-If the reply language cannot be mapped, audio is skipped and the text reply still succeeds.
-
-## Data Storage
-
-Conversation history is stored in Supabase Postgres. Each user record contains:
-
-- `summary`: compacted history used for long-running conversations
-- `messages`: recent user and assistant turns, including image paths for recent user image messages
-- `updatedAt`: last write timestamp
-
-Inbound images are stored in Supabase Storage. Generated audio is not written to disk. It is stored in memory and expires after `AUDIO_MEDIA_TTL_MS`. Restarting the process clears all pending audio assets.
-
-Stored images are cleaned up in three situations:
-
-- When the user sends `/clear` or `@clear`
-- When image-bearing messages are summarized out of the recent-message window
-- When the image retention worker sees that an image is older than `SUPABASE_IMAGE_RETENTION_DAYS`
-
-## Operational Notes
-
-- If `GROQ_API_KEY` is missing or invalid, the app returns a configuration message instead of a model response.
-- If Supabase is not configured, conversation persistence and image support will fail until `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set.
-- If audio is enabled but `PUBLIC_BASE_URL` is missing, the app logs why audio was skipped.
-- If Twilio REST credentials are missing, text replies still work through webhook TwiML, but async audio sends will be skipped.
-- If users send unsupported media, the app returns a text-only fallback.
-- If the app is not running, expired images will not be cleaned up until the next cleanup pass after it starts again.
+Twilio media fetches may require valid Twilio credentials. Make sure `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are correct.
 
 ## Development Notes
 
-- The app now depends on Supabase for conversation persistence and inbound image storage.
-- The conceptual product docs in `prompts/` describe a larger assistant than what is implemented in code right now.
-- There is currently no test suite in the repository, so manual smoke testing is the main verification path.
+- this codebase currently has no automated test suite
+- the retention worker is process-local, not a separate scheduler
+- the system prompt is assembled in [lib/prompt-loader.js](./lib/prompt-loader.js)
+- conversation compaction and multimodal prompt building live in [lib/chat-service.js](./lib/chat-service.js)
+- Supabase persistence lives in [lib/conversation-store.js](./lib/conversation-store.js)
+- image retention logic lives in [lib/image-retention-service.js](./lib/image-retention-service.js)
 
 ## Scripts
 
 ```bash
-npm start     # start the server
-npm run dev   # start with nodemon
+npm start
+npm run dev
 ```
