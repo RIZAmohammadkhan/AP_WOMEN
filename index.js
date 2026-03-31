@@ -7,7 +7,7 @@ const { config } = require("./lib/config");
 const { buildPromptBundle } = require("./lib/prompt-loader");
 const { createSupabaseAdminClient } = require("./lib/supabase-client");
 const { ConversationStore } = require("./lib/conversation-store");
-const { createGroqService } = require("./lib/groq-service");
+const { createLangChainService } = require("./lib/langchain-service");
 const { createChatService } = require("./lib/chat-service");
 const { AudioStore } = require("./lib/audio-store");
 const { ImageStore } = require("./lib/image-store");
@@ -26,7 +26,7 @@ const conversationStore = new ConversationStore({
   config,
   supabaseClient,
 });
-const groqService = createGroqService(config);
+const llmService = createLangChainService(config);
 const sarvamService = createSarvamService(config);
 const audioStore = new AudioStore(config.audioMediaTtlMs);
 const imageStore = new ImageStore({
@@ -40,7 +40,7 @@ const twilioRestClient =
     : null;
 const chatService = createChatService({
   config,
-  groqService,
+  llmService,
   conversationStore,
   promptBundle,
   imageStore,

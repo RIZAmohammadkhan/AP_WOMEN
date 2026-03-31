@@ -2,7 +2,7 @@
 
 Meri Behen is a WhatsApp-first AI assistant designed for women-led Self-Help Groups in Andhra Pradesh. The idea is simple: meet users inside a tool they already use, let them ask in their own language through text, voice notes, or images, and return clear next steps without making them learn a new app.
 
-This repository contains the current backend webhook service. It receives inbound WhatsApp messages from Twilio, stores conversation state in Supabase, uses Groq for chat and image-aware responses, uses Sarvam for speech-to-text and text-to-speech, and sends replies back over WhatsApp.
+This repository contains the current backend webhook service. It receives inbound WhatsApp messages from Twilio, stores conversation state in Supabase, uses LangChain to route chat and image-aware responses to the configured LLM provider, uses Sarvam for speech-to-text and text-to-speech, and sends replies back over WhatsApp.
 
 ## Why This Project Exists
 
@@ -13,7 +13,7 @@ Many SHGs already produce valuable products such as pickles, handicrafts, textil
 - scheme and onboarding flows are hard to understand
 - most digital tools assume English fluency and higher digital confidence
 
-Meri Behen is meant to reduce that friction by turning WhatsApp into a conversational business guide. The long-term product direction lives in [prompts/idea.md](./prompts/idea.md) and the conceptual tool contracts live in [prompts/tools.md](./prompts/tools.md).
+Meri Behen is meant to reduce that friction by turning WhatsApp into a conversational business guide. The long-term product direction lives in [prompt/idea.md](./prompt/idea.md) and the conceptual tool contracts live in [prompt/tools.md](./prompt/tools.md).
 
 ## What The App Does Today
 
@@ -26,16 +26,16 @@ Meri Behen is meant to reduce that friction by turning WhatsApp into a conversat
 - Lets the AI answer questions about a recent image in later turns
 - Stores conversation state in Supabase Postgres
 - Summarizes older conversation turns to stay within context limits
-- Uses a Groq text model for normal chat replies
-- Uses a Groq vision-capable model when image context is present
+- Uses LangChain to call the configured text model for normal chat replies
+- Uses the configured vision model when image context is present
 - Optionally sends outbound voice-note replies using Sarvam TTS
 - Supports `/clear` and `@clear` to reset a user conversation
 - Cleans up stored images after the retention window
 
 ## What Is Not Implemented Yet
 
-- real business data tools from [prompts/tools.md](./prompts/tools.md)
-- automated tests
+- real business data tools from [prompt/tools.md](./prompt/tools.md)
+- broader test coverage
 - production deployment packaging
 - background job infrastructure outside the app process
 - analytics, tracing, and admin tooling
@@ -55,7 +55,7 @@ If an image falls out of the recent-message window and gets summarized, the raw 
 - Node.js 18+
 - Express
 - Twilio WhatsApp webhooks and Twilio REST API
-- Groq chat completions
+- LangChain chat models
 - Supabase Postgres
 - Supabase Storage
 - Sarvam Speech-to-Text
@@ -68,10 +68,10 @@ If an image falls out of the recent-message window and gets summarized, the raw 
 3. If the message is audio, the app downloads the media from Twilio and sends it to Sarvam STT.
 4. If the message is an image, the app downloads it from Twilio and uploads it to Supabase Storage.
 5. The conversation is loaded from Supabase.
-6. The app builds a chat payload for Groq:
+6. The app builds a chat payload for LangChain:
    - text-only model for normal turns
    - vision model when recent messages include images
-7. Groq returns the assistant response.
+7. The selected provider returns the assistant response.
 8. The text reply is sent back immediately as TwiML.
 9. If audio output is enabled, the app generates speech with Sarvam and sends voice-note media through the Twilio REST API.
 10. A retention worker periodically deletes expired images from Supabase Storage and removes stale image references from conversations.
@@ -83,8 +83,9 @@ If an image falls out of the recent-message window and gets summarized, the raw 
 |-- index.js
 |-- lib/
 |   |-- config.js
+|   |-- llm-provider-config.js
 |   |-- prompt-loader.js
-|   |-- groq-service.js
+|   |-- langchain-service.js
 |   |-- chat-service.js
 |   |-- conversation-store.js
 |   |-- supabase-client.js
@@ -99,7 +100,7 @@ If an image falls out of the recent-message window and gets summarized, the raw 
 |   |-- language.js
 |-- supabase/
 |   |-- schema.sql
-|-- prompts/
+|-- prompt/
 |   |-- idea.md
 |   |-- tools.md
 |-- .env.example
@@ -111,7 +112,7 @@ If an image falls out of the recent-message window and gets summarized, the raw 
 - Node.js 18 or newer
 - npm
 - a Twilio account with WhatsApp enabled
-- a Groq API key
+- one provider API key for Groq, OpenAI, Anthropic, or Gemini
 - a Supabase project
 - a public HTTPS URL for Twilio webhook testing, such as ngrok
 
@@ -167,7 +168,10 @@ At minimum, provide:
 
 ```env
 PORT=3000
+LLM_PROVIDER=groq
 GROQ_API_KEY=your_groq_api_key
+GROQ_TEXT_MODEL=openai/gpt-oss-120b
+GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
@@ -188,6 +192,38 @@ TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 PUBLIC_BASE_URL=https://your-public-domain.example
 ```
+
+To switch providers, keep the same app code and change only env:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_TEXT_MODEL=gpt-5.4
+OPENAI_VISION_MODEL=gpt-5.4
+OPENAI_SUMMARY_MODEL=gpt-5.4
+```
+
+```env
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=your_anthropic_api_key
+ANTHROPIC_TEXT_MODEL=claude-opus-4-1-20250805
+ANTHROPIC_VISION_MODEL=claude-opus-4-1-20250805
+ANTHROPIC_SUMMARY_MODEL=claude-opus-4-1-20250805
+```
+
+```env
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_TEXT_MODEL=gemini-2.5-pro
+GEMINI_VISION_MODEL=gemini-2.5-pro
+GEMINI_SUMMARY_MODEL=gemini-2.5-pro
+```
+
+These defaults were chosen against official docs checked on March 31, 2026:
+
+- OpenAI: `gpt-5.4` is the current flagship in the API changelog
+- Anthropic: `claude-opus-4-1-20250805` is the latest stable Opus snapshot shown in the models overview
+- Google: `gemini-2.5-pro` is the current stable advanced Gemini model; Gemini 3.1 Pro is newer but still preview
 
 ### 5. Start the server
 
@@ -230,10 +266,24 @@ Important behavior:
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `PORT` | No | `3000` | Express server port |
-| `GROQ_API_KEY` | Yes | - | Enables chat replies and summarization |
-| `GROQ_CHAT_MODEL` | No | `openai/gpt-oss-20b` | Model used for text-only turns |
-| `GROQ_VISION_MODEL` | No | `meta-llama/llama-4-scout-17b-16e-instruct` | Model used when image context is present |
-| `SUMMARY_MODEL` | No | same as `GROQ_CHAT_MODEL` | Model used for conversation summarization |
+| `LLM_PROVIDER` | No | `groq` | Active LangChain provider: `groq`, `openai`, `anthropic`, or `gemini` |
+| `GROQ_TEXT_MODEL` | No | `openai/gpt-oss-120b` | Groq text model |
+| `GROQ_VISION_MODEL` | No | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq vision model |
+| `GROQ_SUMMARY_MODEL` | No | `openai/gpt-oss-120b` | Groq summary model |
+| `LLM_MAX_OUTPUT_TOKENS` | No | `700` | Max output tokens passed to the selected chat model |
+| `GROQ_API_KEY` | Required when `LLM_PROVIDER=groq` | - | Groq API key |
+| `OPENAI_API_KEY` | Required when `LLM_PROVIDER=openai` | - | OpenAI API key |
+| `OPENAI_TEXT_MODEL` | No | `gpt-5.4` | OpenAI text model |
+| `OPENAI_VISION_MODEL` | No | `gpt-5.4` | OpenAI vision model |
+| `OPENAI_SUMMARY_MODEL` | No | `gpt-5.4` | OpenAI summary model |
+| `ANTHROPIC_API_KEY` | Required when `LLM_PROVIDER=anthropic` | - | Anthropic API key |
+| `ANTHROPIC_TEXT_MODEL` | No | `claude-opus-4-1-20250805` | Anthropic text model |
+| `ANTHROPIC_VISION_MODEL` | No | `claude-opus-4-1-20250805` | Anthropic vision model |
+| `ANTHROPIC_SUMMARY_MODEL` | No | `claude-opus-4-1-20250805` | Anthropic summary model |
+| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Required when `LLM_PROVIDER=gemini` | - | Gemini API key |
+| `GEMINI_TEXT_MODEL` | No | `gemini-2.5-pro` | Gemini text model |
+| `GEMINI_VISION_MODEL` | No | `gemini-2.5-pro` | Gemini vision model |
+| `GEMINI_SUMMARY_MODEL` | No | `gemini-2.5-pro` | Gemini summary model |
 | `SYSTEM_PROMPT` | No | built-in fallback | Base assistant instruction seed |
 | `SUPABASE_URL` | Yes | - | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Service-role key used by the server |
@@ -259,17 +309,17 @@ Important behavior:
 | `SARVAM_TTS_PACE` | No | `1` | Sarvam TTS pace |
 | `AUDIO_MEDIA_TTL_MS` | No | `600000` | In-memory TTL for generated outbound audio assets |
 
-Model note:
+Provider note:
 
-- as checked on March 31, 2026 in Groq's supported-model docs, `openai/gpt-oss-120b` should be treated as text-only in this app
-- image turns should continue using a vision-capable model such as `meta-llama/llama-4-scout-17b-16e-instruct`
-- if `GROQ_VISION_MODEL` is set to a known text-only model, the app falls back to the default vision model and logs a warning
+- the LLM layer now runs through LangChain so later tool binding can happen without replacing the chat service again
+- if `LLM_PROVIDER=groq` and `GROQ_VISION_MODEL` is a known text-only Groq model, the app falls back to `meta-llama/llama-4-scout-17b-16e-instruct` and logs a warning
+- when `LLM_PROVIDER=gemini`, image URLs are converted to base64 data URLs before the LangChain call because the Google adapter expects inline image data
 
 ## Supported Inputs
 
 ### Text
 
-Plain text messages are sent directly into the Groq chat flow.
+Plain text messages are sent directly into the LangChain chat flow for the selected provider.
 
 ### Audio
 
@@ -287,7 +337,7 @@ When the incoming message is an image:
 - Twilio media is downloaded
 - the image is uploaded to Supabase Storage
 - the image path is stored in conversation history
-- fresh signed URLs are generated for recent image messages when Groq needs to reason over them
+- fresh signed URLs are generated for recent image messages when the selected model needs to reason over them
 
 This lets users ask follow-up questions about a recent image in later turns.
 
@@ -359,6 +409,14 @@ For real media testing, use Twilio WhatsApp directly because media URLs and auth
 
 ## Troubleshooting
 
+### The assistant says it is not configured
+
+Check all of:
+
+- `LLM_PROVIDER`
+- the provider-specific model envs for the selected provider, such as `OPENAI_TEXT_MODEL` or `GEMINI_TEXT_MODEL`
+- the matching provider API key for the selected provider
+
 ### `Could not find the table 'public.conversations' in the schema cache`
 
 Run [supabase/schema.sql](./supabase/schema.sql) in Supabase SQL Editor, then restart the app.
@@ -397,9 +455,10 @@ Twilio media fetches may require valid Twilio credentials. Make sure `TWILIO_ACC
 
 ## Development Notes
 
-- this codebase currently has no automated test suite
+- basic automated tests run with `npm test`
 - the retention worker is process-local, not a separate scheduler
 - the system prompt is assembled in [lib/prompt-loader.js](./lib/prompt-loader.js)
+- provider selection and LangChain model setup live in [lib/langchain-service.js](./lib/langchain-service.js)
 - conversation compaction and multimodal prompt building live in [lib/chat-service.js](./lib/chat-service.js)
 - Supabase persistence lives in [lib/conversation-store.js](./lib/conversation-store.js)
 - image retention logic lives in [lib/image-retention-service.js](./lib/image-retention-service.js)

@@ -47,8 +47,9 @@ test("classifyTurn recognizes image follow-ups", () => {
 });
 
 test("respondToMessage suppresses stale replies after reset", async () => {
-  const groqService = {
+  const llmService = {
     isConfigured: true,
+    configurationMessage: "Missing config",
     async chat() {
       return "This reply should not be sent.";
     },
@@ -84,7 +85,7 @@ test("respondToMessage suppresses stale replies after reset", async () => {
       maxRecentMessages: 12,
       maxContextChars: 6000,
     },
-    groqService,
+    llmService,
     conversationStore,
     promptBundle: {
       systemPrompt: "You are Meri Behen.",
