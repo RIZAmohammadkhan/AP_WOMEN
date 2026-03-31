@@ -5,20 +5,34 @@ const twilio = require("twilio");
 
 const { config } = require("./lib/config");
 const { buildPromptBundle } = require("./lib/prompt-loader");
+const { createSupabaseAdminClient } = require("./lib/supabase-client");
 const { ConversationStore } = require("./lib/conversation-store");
 const { createGroqService } = require("./lib/groq-service");
 const { createChatService } = require("./lib/chat-service");
 const { AudioStore } = require("./lib/audio-store");
+const { ImageStore } = require("./lib/image-store");
+const { createTwilioMediaService } = require("./lib/twilio-media-service");
 const { createSarvamService } = require("./lib/sarvam-service");
 const { createAudioResponseService } = require("./lib/audio-response-service");
 const { createAudioInputService } = require("./lib/audio-input-service");
+const { createImageInputService } = require("./lib/image-input-service");
+const { createImageRetentionService } = require("./lib/image-retention-service");
 
 const app = express();
 const promptBundle = buildPromptBundle(config);
-const conversationStore = new ConversationStore(config.conversationStorePath);
+const { client: supabaseClient } = createSupabaseAdminClient(config);
+const conversationStore = new ConversationStore({
+  config,
+  supabaseClient,
+});
 const groqService = createGroqService(config);
 const sarvamService = createSarvamService(config);
 const audioStore = new AudioStore(config.audioMediaTtlMs);
+const imageStore = new ImageStore({
+  config,
+  supabaseClient,
+});
+const twilioMediaService = createTwilioMediaService({ config });
 const twilioRestClient =
   config.twilioAccountSid && config.twilioAuthToken
     ? twilio(config.twilioAccountSid, config.twilioAuthToken)
@@ -28,6 +42,7 @@ const chatService = createChatService({
   groqService,
   conversationStore,
   promptBundle,
+  imageStore,
 });
 const audioResponseService = createAudioResponseService({
   config,
@@ -38,9 +53,30 @@ const audioResponseService = createAudioResponseService({
 const audioInputService = createAudioInputService({
   config,
   sarvamService,
+  twilioMediaService,
+});
+const imageInputService = createImageInputService({
+  twilioMediaService,
+  imageStore,
+});
+const imageRetentionService = createImageRetentionService({
+  config,
+  conversationStore,
+  imageStore,
 });
 
 app.use(express.urlencoded({ extended: false }));
+
+function isClearCommand(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  return normalized === "/clear" || normalized === "@clear";
+}
+
+function collectImagePaths(messages) {
+  return (messages || [])
+    .map((message) => message?.imagePath)
+    .filter((path) => typeof path === "string" && path);
+}
 
 function handleAudioFetch(req, res) {
   const asset = audioStore.get(req.params.token);
@@ -79,7 +115,15 @@ app.post("/webhook", async (req, res) => {
   const mediaUrl = req.body.MediaUrl0 || "";
   const isAudioMessage =
     hasMedia && audioInputService.isSupportedAudioContentType(mediaContentType);
-  const type = isAudioMessage ? "audio" : hasMedia ? "media" : "text";
+  const isImageMessage =
+    hasMedia && imageInputService.isSupportedImageContentType(mediaContentType);
+  const type = isAudioMessage
+    ? "audio"
+    : isImageMessage
+      ? "image"
+      : hasMedia
+        ? "media"
+        : "text";
   const publicBaseUrl = audioResponseService.resolvePublicBaseUrl(req);
 
   console.log(`Incoming message from ${from} [${type}]: ${body}`);
@@ -87,11 +131,41 @@ app.post("/webhook", async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
 
   try {
-    let incomingText = body;
+    if (isClearCommand(body)) {
+      if (!conversationStore.isConfigured) {
+        twiml.message(
+          "I'm not configured yet. Please add Supabase credentials and try again."
+        );
+        return res.type("text/xml").send(twiml.toString());
+      }
 
-    if (hasMedia && !isAudioMessage) {
+      const clearedConversation = await conversationStore.clearConversation(from);
+      const imagePaths = collectImagePaths(clearedConversation.messages);
+
+      if (imageStore.isConfigured && imagePaths.length) {
+        try {
+          await imageStore.deleteImages(imagePaths);
+        } catch (error) {
+          console.error("Failed to delete cleared conversation images:", error);
+        }
+      }
+
       twiml.message(
-        "Text and voice notes are supported right now. Please send your message as text or audio."
+        "Your chat history has been cleared. You can start a fresh conversation now."
+      );
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    await imageRetentionService.cleanupConversation(from);
+
+    let incomingMessage = {
+      role: "user",
+      text: body,
+    };
+
+    if (hasMedia && !isAudioMessage && !isImageMessage) {
+      twiml.message(
+        "Text, voice notes, and images are supported right now. Please send your message as text, audio, or image."
       );
       return res.type("text/xml").send(twiml.toString());
     }
@@ -102,17 +176,38 @@ app.post("/webhook", async (req, res) => {
         mediaContentType,
       });
 
-      incomingText = [body, transcription.text].filter(Boolean).join("\n").trim();
+      incomingMessage = {
+        role: "user",
+        text: [body, transcription.text].filter(Boolean).join("\n").trim(),
+      };
     }
 
-    if (!incomingText) {
-      twiml.message("Please send a text message or voice note so I can help you.");
+    if (isImageMessage) {
+      const imageMessage = await imageInputService.processIncomingImage({
+        userId: from,
+        mediaUrl,
+        mediaContentType,
+        text: body,
+      });
+
+      incomingMessage = {
+        role: "user",
+        text: imageMessage.text,
+        imagePath: imageMessage.imagePath,
+        imageStoredAt: imageMessage.imageStoredAt,
+      };
+    }
+
+    if (!incomingMessage.text && !incomingMessage.imagePath) {
+      twiml.message(
+        "Please send a text message, voice note, or image so I can help you."
+      );
       return res.type("text/xml").send(twiml.toString());
     }
 
     const reply = await chatService.respondToMessage({
       userId: from,
-      text: incomingText,
+      message: incomingMessage,
     });
 
     twiml.message(reply.text);
@@ -150,3 +245,6 @@ app.post("/webhook", async (req, res) => {
 app.listen(config.port, () => {
   console.log(`Meri Behen server running on port ${config.port}`);
 });
+
+imageRetentionService.start();
+void imageRetentionService.runCleanupPass();
