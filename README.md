@@ -72,8 +72,8 @@ If an image falls out of the recent-message window and gets summarized, the raw 
    - text-only model for normal turns
    - vision model when recent messages include images
 7. The selected provider returns the assistant response.
-8. The text reply is sent back immediately as TwiML.
-9. If audio output is enabled, the app generates speech with Sarvam and sends voice-note media through the Twilio REST API.
+8. When Twilio REST credentials are configured, the webhook returns immediately and the app sends the text reply through the Twilio REST API in one or more WhatsApp-sized chunks.
+9. If audio output is enabled, the app generates speech with Sarvam and sends voice-note media through the same outbound Twilio REST path after the text reply succeeds.
 10. A retention worker periodically deletes expired images from Supabase Storage and removes stale image references from conversations.
 
 ## Repository Structure

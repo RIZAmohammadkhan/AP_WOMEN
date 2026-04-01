@@ -13,6 +13,7 @@ const { AudioStore } = require("./lib/audio-store");
 const { ImageStore } = require("./lib/image-store");
 const { createTwilioMediaService } = require("./lib/twilio-media-service");
 const { createSarvamService } = require("./lib/sarvam-service");
+const { createOutboundMessageService } = require("./lib/outbound-message-service");
 const { createAudioResponseService } = require("./lib/audio-response-service");
 const { createAudioInputService } = require("./lib/audio-input-service");
 const { createImageInputService } = require("./lib/image-input-service");
@@ -38,6 +39,9 @@ const twilioRestClient =
   config.twilioAccountSid && config.twilioAuthToken
     ? twilio(config.twilioAccountSid, config.twilioAuthToken)
     : null;
+const outboundMessageService = createOutboundMessageService({
+  twilioClient: twilioRestClient,
+});
 const chatService = createChatService({
   config,
   llmService,
@@ -72,6 +76,120 @@ function collectImagePaths(messages) {
   return (messages || [])
     .map((message) => message?.imagePath)
     .filter((path) => typeof path === "string" && path);
+}
+
+async function buildReplyForIncomingMessage({
+  from,
+  body,
+  hasMedia,
+  isAudioMessage,
+  isImageMessage,
+  mediaUrl,
+  mediaContentType,
+}) {
+  if (isClearCommand(body)) {
+    if (!conversationStore.isConfigured) {
+      return {
+        status: "ok",
+        text: "I'm not configured yet. Please add Supabase credentials and try again.",
+        shouldSendAudio: false,
+      };
+    }
+
+    const resetResult = await conversationStore.resetConversation(from);
+    const imagePaths = collectImagePaths(resetResult.clearedConversation.messages);
+
+    if (imageStore.isConfigured && imagePaths.length) {
+      try {
+        await imageStore.deleteImages(imagePaths);
+      } catch (error) {
+        console.error("Failed to delete cleared conversation images:", error);
+      }
+    }
+
+    return {
+      status: "ok",
+      text: "Your chat history has been cleared. You can start a fresh conversation now.",
+      shouldSendAudio: false,
+    };
+  }
+
+  await imageRetentionService.cleanupConversation(from);
+
+  let incomingMessage = {
+    role: "user",
+    text: body,
+  };
+
+  if (hasMedia && !isAudioMessage && !isImageMessage) {
+    return {
+      status: "ok",
+      text: "Text, voice notes, and images are supported right now. Please send your message as text, audio, or image.",
+      shouldSendAudio: false,
+    };
+  }
+
+  if (isAudioMessage) {
+    const transcription = await audioInputService.transcribeIncomingAudio({
+      mediaUrl,
+      mediaContentType,
+    });
+
+    incomingMessage = {
+      role: "user",
+      text: [body, transcription.text].filter(Boolean).join("\n").trim(),
+    };
+  }
+
+  if (isImageMessage) {
+    const imageMessage = await imageInputService.processIncomingImage({
+      userId: from,
+      mediaUrl,
+      mediaContentType,
+      text: body,
+    });
+
+    incomingMessage = {
+      role: "user",
+      text: imageMessage.text,
+      imagePath: imageMessage.imagePath,
+      imageStoredAt: imageMessage.imageStoredAt,
+    };
+  }
+
+  if (!incomingMessage.text && !incomingMessage.imagePath) {
+    return {
+      status: "ok",
+      text: "Please send a text message, voice note, or image so I can help you.",
+      shouldSendAudio: false,
+    };
+  }
+
+  return chatService.respondToMessage({
+    userId: from,
+    message: incomingMessage,
+  });
+}
+
+async function deliverReply({ reply, from, to, publicBaseUrl }) {
+  if (reply.status === "stale_after_reset") {
+    return;
+  }
+
+  await outboundMessageService.sendTextReply({
+    text: reply.text,
+    to: from,
+    from: to,
+  });
+
+  if (reply.shouldSendAudio) {
+    await audioResponseService.sendAudioReply({
+      text: reply.text,
+      to: from,
+      from: to,
+      publicBaseUrl,
+    });
+  }
 }
 
 function handleAudioFetch(req, res) {
@@ -127,83 +245,59 @@ app.post("/webhook", async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
 
   try {
-    if (isClearCommand(body)) {
-      if (!conversationStore.isConfigured) {
-        twiml.message(
-          "I'm not configured yet. Please add Supabase credentials and try again."
-        );
-        return res.type("text/xml").send(twiml.toString());
-      }
+    if (outboundMessageService.isConfigured && from !== "unknown" && to) {
+      res.type("text/xml").send(twiml.toString());
 
-      const resetResult = await conversationStore.resetConversation(from);
-      const imagePaths = collectImagePaths(resetResult.clearedConversation.messages);
-
-      if (imageStore.isConfigured && imagePaths.length) {
+      // When REST messaging is configured, answer the webhook immediately and do the
+      // slower STT/LLM work in the background so Twilio does not time out the text reply.
+      void (async () => {
         try {
-          await imageStore.deleteImages(imagePaths);
+          const reply = await buildReplyForIncomingMessage({
+            from,
+            body,
+            hasMedia,
+            isAudioMessage,
+            isImageMessage,
+            mediaUrl,
+            mediaContentType,
+          });
+
+          await deliverReply({
+            reply,
+            from,
+            to,
+            publicBaseUrl,
+          });
         } catch (error) {
-          console.error("Failed to delete cleared conversation images:", error);
+          console.error("Async webhook reply failed:", error);
+
+          const fallbackText =
+            error.userMessage ||
+            "I'm having trouble replying right now. Please try again in a moment.";
+
+          await outboundMessageService
+            .sendTextReply({
+              text: fallbackText,
+              to: from,
+              from: to,
+            })
+            .catch((sendError) => {
+              console.error("Async fallback text reply failed:", sendError);
+            });
         }
-      }
+      })();
 
-      twiml.message(
-        "Your chat history has been cleared. You can start a fresh conversation now."
-      );
-      return res.type("text/xml").send(twiml.toString());
+      return;
     }
 
-    await imageRetentionService.cleanupConversation(from);
-
-    let incomingMessage = {
-      role: "user",
-      text: body,
-    };
-
-    if (hasMedia && !isAudioMessage && !isImageMessage) {
-      twiml.message(
-        "Text, voice notes, and images are supported right now. Please send your message as text, audio, or image."
-      );
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    if (isAudioMessage) {
-      const transcription = await audioInputService.transcribeIncomingAudio({
-        mediaUrl,
-        mediaContentType,
-      });
-
-      incomingMessage = {
-        role: "user",
-        text: [body, transcription.text].filter(Boolean).join("\n").trim(),
-      };
-    }
-
-    if (isImageMessage) {
-      const imageMessage = await imageInputService.processIncomingImage({
-        userId: from,
-        mediaUrl,
-        mediaContentType,
-        text: body,
-      });
-
-      incomingMessage = {
-        role: "user",
-        text: imageMessage.text,
-        imagePath: imageMessage.imagePath,
-        imageStoredAt: imageMessage.imageStoredAt,
-      };
-    }
-
-    if (!incomingMessage.text && !incomingMessage.imagePath) {
-      twiml.message(
-        "Please send a text message, voice note, or image so I can help you."
-      );
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const reply = await chatService.respondToMessage({
-      userId: from,
-      message: incomingMessage,
+    const reply = await buildReplyForIncomingMessage({
+      from,
+      body,
+      hasMedia,
+      isAudioMessage,
+      isImageMessage,
+      mediaUrl,
+      mediaContentType,
     });
 
     if (reply.status !== "stale_after_reset") {
